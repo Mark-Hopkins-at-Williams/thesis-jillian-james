@@ -84,7 +84,8 @@ def construct_gold_generator(vocab_size):
     file_obj = open('save/target_params_py3.pkl', 'rb')
     target_params = pickle.load(file_obj, encoding='utf8')
     #target_params = pickle.load(open('save/target_params_py3.pkl'))
-    return TARGET_LSTM(vocab_size, BATCH_SIZE, EMB_DIM, HIDDEN_DIM, SEQ_LENGTH, START_TOKEN, target_params) # The oracle model
+    return TARGET_LSTM(vocab_size, BATCH_SIZE, EMB_DIM, HIDDEN_DIM, 
+                       SEQ_LENGTH, START_TOKEN, target_params) # The oracle model
 
 def construct_discriminator(vocab_size):
     discriminator = Discriminator(sequence_length=20, num_classes=2, vocab_size=vocab_size, embedding_size=dis_embedding_dim, 
@@ -150,7 +151,6 @@ def train_generator(sess, generator, gold_generator, rollout, discriminator,
     
 
 def train_discriminator(sess, discriminator, dis_data_loader, generator):
-    # Train the discriminator
     for _ in range(5):
         generate_samples(sess, generator, BATCH_SIZE, generated_num, negative_file)
         dis_data_loader.load_train_data(positive_file, negative_file)
@@ -175,11 +175,8 @@ def main():
     log = open('save/experiment-log.txt', 'w')
 
 
-    #likelihood_data_loader = Gen_Data_loader(BATCH_SIZE) # For testing
-    dis_data_loader = Dis_dataloader(BATCH_SIZE)
-
     generator = construct_generator(vocab_size)
-    target_lstm = construct_gold_generator(vocab_size)
+    gold_generator = construct_gold_generator(vocab_size)
     discriminator = construct_discriminator(vocab_size)
 
     sess = initialize_session()
@@ -187,16 +184,17 @@ def main():
     # First, use the oracle model to provide the positive examples, 
     # which are sampled from the oracle data distribution
     gen_data_loader = Gen_Data_loader(BATCH_SIZE)
-    generate_samples(sess, target_lstm, BATCH_SIZE, generated_num, positive_file)
+    generate_samples(sess, gold_generator, BATCH_SIZE, generated_num, positive_file)
     gen_data_loader.create_batches(positive_file)
 
     #  pre-train generator
     print('Start pre-training...')
     pretrain_generator(sess, generator, gen_data_loader, 
-                       target_lstm, log)
+                       gold_generator, log)
 
     print('Start pre-training discriminator...')
     # Train 3 epoch on the generated data and do this for 50 times
+    dis_data_loader = Dis_dataloader(BATCH_SIZE)
     pretrain_discriminator(sess, discriminator, dis_data_loader, generator)
 
     rollout = ROLLOUT(generator, 0.8)
@@ -205,7 +203,7 @@ def main():
     print('Start Adversarial Training...')
     log.write('adversarial training...\n')
     for total_batch in range(TOTAL_BATCH):
-        train_generator(sess, generator, target_lstm, rollout, discriminator, 
+        train_generator(sess, generator, gold_generator, rollout, discriminator, 
                         total_batch, log)        
         rollout.update_params()      
         train_discriminator(sess, discriminator, dis_data_loader, generator)

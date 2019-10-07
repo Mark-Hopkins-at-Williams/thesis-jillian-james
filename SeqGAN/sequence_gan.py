@@ -33,7 +33,6 @@ dis_batch_size = 64
 #  Basic Training Parameters
 #########################################################################################
 TOTAL_BATCH = 200
-positive_file = 'save/real_data.txt'
 negative_file = 'save/generator_sample.txt'
 eval_file = 'save/eval_file.txt'
 generated_num = 10000
@@ -51,19 +50,15 @@ def generate_samples(sess, trainable_model, batch_size, generated_num, output_fi
             fout.write(buffer)
 
 
-def target_loss(sess, target_lstm, data_loader):
-    # target_loss means the oracle negative log-likelihood tested with the oracle model "target_lstm"
-    # For more details, please see the Section 4 in https://arxiv.org/abs/1609.05473
+
+def validation_loss(sess, generator, data_loader):
     nll = []
     data_loader.reset_pointer()
-
     for it in range(data_loader.num_batch):
         batch = data_loader.next_batch()
-        g_loss = sess.run(target_lstm.pretrain_loss, {target_lstm.x: batch})
+        g_loss = sess.run(generator.pretrain_loss, {generator.x: batch})
         nll.append(g_loss)
-
     return np.mean(nll)
-
 
 def pre_train_epoch(sess, trainable_model, data_loader):
     # Pre-train the generator using MLE for one epoch
@@ -100,22 +95,21 @@ def initialize_session():
     return sess
 
 def pretrain_generator(sess, generator, gen_data_loader, 
-                       gold_generator, log):
+                       validation_data_loader,
+                       log):
     #  pre-train generator
     print('Start pre-training...')
     log.write('pre-training...\n')
-    likelihood_data_loader = Gen_Data_loader(BATCH_SIZE) # For testing
     for epoch in range(PRE_EPOCH_NUM):
         pre_train_epoch(sess, generator, gen_data_loader)
         if epoch % 5 == 0:
             generate_samples(sess, generator, BATCH_SIZE, generated_num, eval_file)
-            likelihood_data_loader.create_batches(eval_file)
-            test_loss = target_loss(sess, gold_generator, likelihood_data_loader)
+            test_loss = validation_loss(sess, validation_data_loader)
             print('pre-train epoch ', epoch, 'test_loss ', test_loss)
             buffer = 'epoch:\t'+ str(epoch) + '\tnll:\t' + str(test_loss) + '\n'
             log.write(buffer)
 
-def pretrain_discriminator(sess, discriminator, dis_data_loader, generator):
+def pretrain_discriminator(sess, discriminator, dis_data_loader, generator, positive_file):
     # Train 3 epoch on the generated data and do this for 50 times
     for _ in range(50):
         generate_samples(sess, generator, BATCH_SIZE, generated_num, negative_file)
@@ -131,7 +125,9 @@ def pretrain_discriminator(sess, discriminator, dis_data_loader, generator):
                 }
                 _ = sess.run(discriminator.train_op, feed)
 
-def train_generator(sess, generator, gold_generator, rollout, discriminator, 
+def train_generator(sess, generator, 
+                    validation_data_loader,
+                    rollout, discriminator, 
                     total_batch, log):
     for it in range(1):
         samples = generator.generate(sess)
@@ -139,18 +135,15 @@ def train_generator(sess, generator, gold_generator, rollout, discriminator,
         feed = {generator.x: samples, generator.rewards: rewards}
         _ = sess.run(generator.g_updates, feed_dict=feed)
 
-    # Test
-    likelihood_data_loader = Gen_Data_loader(BATCH_SIZE) # For testing
     if total_batch % 5 == 0 or total_batch == TOTAL_BATCH - 1:
         generate_samples(sess, generator, BATCH_SIZE, generated_num, eval_file)
-        likelihood_data_loader.create_batches(eval_file)
-        test_loss = target_loss(sess, gold_generator, likelihood_data_loader)
+        test_loss = validation_loss(sess, validation_data_loader)
         buffer = 'epoch:\t' + str(total_batch) + '\tnll:\t' + str(test_loss) + '\n'
         print('total_batch: ', total_batch, 'test_loss: ', test_loss)
         log.write(buffer)
     
 
-def train_discriminator(sess, discriminator, dis_data_loader, generator):
+def train_discriminator(sess, discriminator, dis_data_loader, generator, positive_file):
     for _ in range(5):
         generate_samples(sess, generator, BATCH_SIZE, generated_num, negative_file)
         dis_data_loader.load_train_data(positive_file, negative_file)
@@ -165,35 +158,30 @@ def train_discriminator(sess, discriminator, dis_data_loader, generator):
                     discriminator.dropout_keep_prob: dis_dropout_keep_prob
                 }
                 _ = sess.run(discriminator.train_op, feed)
+
+def generate_synthetic_data(vocab_size, output_file):
+    sess = initialize_session()
+    gold_generator = construct_gold_generator(vocab_size)
+    generate_samples(sess, gold_generator, BATCH_SIZE, generated_num, output_file)
     
 
-def main():
-    random.seed(SEED)
-    np.random.seed(SEED)
-    assert START_TOKEN == 0
-    vocab_size = 5000  # why not a constant?
+def adversarial_train(positive_train, positive_valid, vocab_size):
     log = open('save/experiment-log.txt', 'w')
-
-
-    generator = construct_generator(vocab_size)
-    gold_generator = construct_gold_generator(vocab_size)
-    discriminator = construct_discriminator(vocab_size)
-
     sess = initialize_session()
-
-    # First, use the oracle model to provide the positive examples, 
-    # which are sampled from the oracle data distribution
-    gen_data_loader = Gen_Data_loader(BATCH_SIZE)
-    generate_samples(sess, gold_generator, BATCH_SIZE, generated_num, positive_file)
-    gen_data_loader.create_batches(positive_file)
 
     #  pre-train generator
     print('Start pre-training...')
-    pretrain_generator(sess, generator, gen_data_loader, 
-                       gold_generator, log)
+    generator = construct_generator(vocab_size)
+    gen_data_loader = Gen_Data_loader(BATCH_SIZE)
+    gen_data_loader.create_batches(positive_train)
+    validation_data_loader = Gen_Data_loader(BATCH_SIZE) # For testing
+    validation_data_loader.create_batches(positive_valid)
+
+    pretrain_generator(sess, generator, gen_data_loader, validation_data_loader, log)
 
     print('Start pre-training discriminator...')
     # Train 3 epoch on the generated data and do this for 50 times
+    discriminator = construct_discriminator(vocab_size)
     dis_data_loader = Dis_dataloader(BATCH_SIZE)
     pretrain_discriminator(sess, discriminator, dis_data_loader, generator)
 
@@ -203,11 +191,22 @@ def main():
     print('Start Adversarial Training...')
     log.write('adversarial training...\n')
     for total_batch in range(TOTAL_BATCH):
-        train_generator(sess, generator, gold_generator, rollout, discriminator, 
+        train_generator(sess, generator, validation_data_loader, rollout, discriminator, 
                         total_batch, log)        
         rollout.update_params()      
         train_discriminator(sess, discriminator, dis_data_loader, generator)
     log.close()
+
+
+
+def main():
+    random.seed(SEED)
+    np.random.seed(SEED)
+    assert START_TOKEN == 0
+    vocab_size = 5000 
+    positive_train = 'save/real_data.txt'
+    positive_valid = 'save/synthetic.valid.txt'
+    adversarial_train(positive_train, positive_valid, vocab_size)
 
 
 if __name__ == '__main__':

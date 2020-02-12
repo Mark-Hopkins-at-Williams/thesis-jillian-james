@@ -1,13 +1,17 @@
 import tensorflow as tf
 import time
 import os
+import csv
+import argparse
+from nltk.translate.bleu_score import corpus_bleu
 from dataloader import Gen_Data_loader, Dis_dataloader
 from generator import Generator, pre_train_generator
 from discriminator import Discriminator, train_discriminator
 from rollout import ROLLOUT
-import argparse
 from trainutil import generate_samples, target_loss
 from datautil import load_task
+from synthetic import generate_random_sents, is_valid_phrase
+
 
 ###############################################################################
 #  Generator  Hyper-parameters
@@ -28,6 +32,9 @@ dis_dropout_keep_prob = 0.75
 dis_l2_reg_lambda = 0.2
 dis_batch_size = 64
 
+
+# For me for running on Mark's machine
+os.environ["CUDA_VISIBLE_DEVICES"]="1,2" 
 
 
 def train_adversarial(sess, saver, MODEL_STRING, generator, discriminator, 
@@ -84,16 +91,23 @@ def main():
                         help='Number of discriminator pre-training steps')
         parser.add_argument('adv_n', type = int,
                         help='Number of adversarial pre-training steps')
-        parser.add_argument('-l', metavar="seq_len", type = int, default = -1,
-                        help = 'Length of the token sequences used for training.')
-        parser.add_argument('-v', metavar="vocab_size", type = int, default = -1,
-                        help = "The size of the vocab from the input files (outout by datautil.py)")
         parser.add_argument('-mn', metavar="model_name", type = str, default = "",
                         help = "Name for the checkpoint files. Will be stored at ./<app>/models/<model_name>")
-    
-        args = parser.parse_args()        
+        parser.add_argument('-numeat', metavar="num_eat", type = int, default = 500,
+                        help = "For synthetic data generation. Determines number of eaters in vocab.")
+        parser.add_argument('-numfeed', metavar="num_feed", type = int, default = 500,
+                        help = "For synthetic data generation. Determines number of feeders in vocab.")
+        parser.add_argument('-numsent', metavar="num_sent", type = int, default = 10000,
+                        help = "For synthetic data generation. Determines number of sentences generated.")
+        args = parser.parse_args()
+
+        synth_gen_params = ("NA", "NA", "NA")
+        if args.app == "synth":
+            synth_gen_params = (args.numsent, args.numfeed, args.numeat)
+            generate_random_sents("../data/synth/input.txt", args.numsent, args.numfeed, args.numeat)
+
         task = load_task(args.app)
-    
+
         #Make the /models directory if its not there.
         model_string = task.path +"/models/"
         if not os.path.exists("./"+model_string):
@@ -108,14 +122,11 @@ def main():
         if not os.path.exists("./"+model_string):
             os.mkdir("./"+model_string)
     
-        return args.gen_n, args.disc_n, args.adv_n, model_string, task
+        return args.gen_n, args.disc_n, args.adv_n, model_string, task, synth_gen_params
     
-    gen_n, disc_n, adv_n, MODEL_STRING, task = parse_arguments()
+    gen_n, disc_n, adv_n, MODEL_STRING, task, SYNTH_GEN_PARAMS = parse_arguments()
 
-    # Initialize the random seed
-    #random.seed(SEED)
-    #np.random.seed(SEED)
-    #tf.set_random_seed(SEED)
+
     assert START_TOKEN == 0
 
     tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
@@ -180,6 +191,51 @@ def main():
     saver.restore(sess, tf.train.latest_checkpoint(MODEL_STRING))
     generate_samples(sess, generator, BATCH_SIZE, task.generated_num, 
                      task.eval_file)
+
+
+    #Writing results to CSV
+    with open(task.eval_file) as f:
+        generated = []
+        for line in f:
+            line = line.strip().split()
+            generated.append(line)
+        generated = task.vocab.decode(generated)
+        f.close()
+
+    with open(task.test_file) as f:
+        references = []
+        for line in f:
+            line = line.strip().split()
+            references.append(line)
+        references = task.vocab.decode(references)  
+        f.close()      
+
+    blue = corpus_bleu([references]*len(generated), generated)
+    print("Run with args {} {} {}: BLEUscore = {}\n".format(gen_n, disc_n, adv_n, blue))
+    
+    prop = "NA"
+
+    if task.name == "synth":
+        total_correct = 0
+        for sentence in generated:
+            if is_valid_phrase(sentence):
+                total_correct +=1
+        prop = total_correct/len(generated)
+        
+    if not os.path.exists("./results.csv"):
+        os.mknod("./results.csv")
+
+    with open("./results.csv", 'a') as csvfile:
+        fieldnames = ["name", "task_name", "num_gen", "num_disc", "num_adv",
+                    "num_sents", "num_feeders", "num_eaters", "BLEU", "prop_valid"]
+        writer = csv.DictWriter(csvfile, fieldnames = fieldnames)
+        writer.writeheader()
+        writer.writerow({"name": MODEL_STRING, "task_name": task.name,  "num_gen": gen_n, 
+                        "num_disc":disc_n, "num_adv": adv_n, "num_sents":SYNTH_GEN_PARAMS[0],
+                        "num_feeders":SYNTH_GEN_PARAMS[1], "num_eaters":SYNTH_GEN_PARAMS[2],
+                        "BLEU": blue, "prop_valid": prop})
+        f.close()
+
 
     log.close()
 
